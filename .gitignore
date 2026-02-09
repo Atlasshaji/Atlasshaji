@@ -1,0 +1,15 @@
+# Ignores sensitive files
+.env
+*.key
+*.pem
+
+# Ignores environment variable files
+.env.local
+.env.development.local
+
+# Ignores build artifacts
+/build/
+/.next/
+/out/
+/dist/
+*.log
