@@ -1,0 +1,53 @@
+name: Progress Monitoring & Self-Correction
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # Daily at midnight UTC
+  workflow_dispatch:
+
+jobs:
+  monitor-and-fix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Fetch Open PRs
+        run: |
+          echo "=== OPEN PULL REQUESTS ===" >> $GITHUB_STEP_SUMMARY
+          gh pr list --state open --json title,url,createdAt \
+            --jq '.[] | "- **\(.title)** - Created: \(.createdAt) - [Link](\(.url))"' >> $GITHUB_STEP_SUMMARY || echo "No open PRs"
+
+      - name: Fetch Open Issues
+        run: |
+          echo "=== OPEN ISSUES ===" >> $GITHUB_STEP_SUMMARY
+          gh issue list --state open --json title,url,createdAt \
+            --jq '.[] | "- **\(.title)** - Created: \(.createdAt) - [Link](\(.url))"' >> $GITHUB_STEP_SUMMARY || echo "No open issues"
+
+      - name: Check Failed Workflow Runs
+        run: |
+          echo "=== WORKFLOW STATUS ===" >> $GITHUB_STEP_SUMMARY
+          gh run list --limit 10 --json name,conclusion,createdAt \
+            --jq '.[] | "- \(.name): **\(.conclusion)**"' >> $GITHUB_STEP_SUMMARY || echo "No failed workflows"
+
+      - name: Re-Run Failed Workflows
+        if: always()
+        run: |
+          echo "Re-running failed workflows..."
+          gh run list --json id,conclusion --jq '.[] | select(.conclusion!="success") | .id' | while read RUN_ID; do
+            gh run rerun "$RUN_ID" || echo "Could not rerun $RUN_ID"
+          done
+
+      - name: Check Security Alerts
+        run: |
+          echo "=== SECURITY ALERTS ===" >> $GITHUB_STEP_SUMMARY
+          gh api repos/${{ github.repository }}/code-scanning/alerts --json rule,severity \
+            --jq '.[] | "- **\(.rule)** - Severity: \(.severity)"' >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No security alerts or scanning not enabled"
+
+      - name: Dependencies Check
+        run: |
+          echo "=== REPOSITORY INFO ===" >> $GITHUB_STEP_SUMMARY
+          echo "- Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Last Commit: $(git log -1 --pretty=%B)" >> $GITHUB_STEP_SUMMARY
