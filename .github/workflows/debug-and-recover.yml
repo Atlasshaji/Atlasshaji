@@ -1,0 +1,99 @@
+name: Debug & Error Recovery System
+
+on:
+  workflow_run:
+    workflows: ["Progress Monitoring & Self-Correction"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  debug-and-recover:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Check System Health
+        run: |
+          echo "=== SYSTEM HEALTH CHECK ===" >> $GITHUB_STEP_SUMMARY
+          echo "- OS: $(uname -s)" >> $GITHUB_STEP_SUMMARY
+          echo "- Git Version: $(git --version)" >> $GITHUB_STEP_SUMMARY
+          echo "- Disk Space: $(df -h / | awk 'NR==2 {print $5}')" >> $GITHUB_STEP_SUMMARY
+          echo "- Memory: $(free -h | awk 'NR==2 {print $3 \"/\" $2}')" >> $GITHUB_STEP_SUMMARY
+
+      - name: Validate Repository Structure
+        run: |
+          echo "=== REPOSITORY VALIDATION ===" >> $GITHUB_STEP_SUMMARY
+          if [ -f "README.md" ]; then echo "✓ README.md found" >> $GITHUB_STEP_SUMMARY; fi
+          if [ -d ".git" ]; then echo "✓ Git repository valid" >> $GITHUB_STEP_SUMMARY; fi
+          if [ -d ".github/workflows" ]; then echo "✓ Workflows directory found" >> $GITHUB_STEP_SUMMARY; fi
+          echo "- Last Git Status: $(git status --short | wc -l) files changed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Error Log Analysis
+        continue-on-error: true
+        run: |
+          echo "=== ERROR LOG ANALYSIS ===" >> $GITHUB_STEP_SUMMARY
+          mkdir -p .github/logs
+          if [ -f ".github/logs/errors.log" ]; then
+            echo "Recent errors:" >> $GITHUB_STEP_SUMMARY
+            tail -20 .github/logs/errors.log >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No error logs found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Backup Current State
+        if: always()
+        run: |
+          echo "=== BACKUP STATUS ===" >> $GITHUB_STEP_SUMMARY
+          mkdir -p .github/backups
+          BACKUP_FILE=".github/backups/backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+          git archive --format=tar.gz -o "$BACKUP_FILE" HEAD
+          ln -sf "$BACKUP_FILE" .github/backups/latest.tar.gz
+          echo "Backup created: $BACKUP_FILE" >> $GITHUB_STEP_SUMMARY
+          ls -lh .github/backups/ >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Backup Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repository-backup
+          path: .github/backups/latest.tar.gz
+
+      - name: File Integrity Check
+        run: |
+          echo "=== FILE INTEGRITY CHECK ===" >> $GITHUB_STEP_SUMMARY
+          find . -type f \( -name "*.yml" -o -name "*.yaml" \) -print | while read file; do
+            echo "Checking: $file" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Create Revert PR on Failure
+        if: failure()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "=== CREATING REVERT PR DUE TO FAILURE ===" >> $GITHUB_STEP_SUMMARY
+          git fetch origin main
+          BAD_SHA="$(git rev-parse HEAD)"
+          BRANCH="revert-${BAD_SHA:0:7}-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          if git revert --no-edit "$BAD_SHA"; then
+            echo "Revert commit created for $BAD_SHA" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Automatic revert failed; creating placeholder commit" >> $GITHUB_STEP_SUMMARY
+            echo "Manual investigation required for revert of $BAD_SHA" > REVERT_NOTE.md
+            git add REVERT_NOTE.md
+            git commit -m "chore(revert): placeholder for failed automatic revert of $BAD_SHA"
+          fi
+          git push -u origin "$BRANCH"
+          echo "$GITHUB_TOKEN" | gh auth login --with-token
+          gh pr create --title "Automated revert: $BAD_SHA" --body "Automated revert branch created due to failing workflow run $GITHUB_RUN_ID. Please review." --base main --head "$BRANCH"
+          echo "Revert PR created: $BRANCH" >> $GITHUB_STEP_SUMMARY
